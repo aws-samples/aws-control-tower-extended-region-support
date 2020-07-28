@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Configure an S3 bucket use with AWS Config Conformance Packs
+Parameters:
+  OrgId:
+    Type: 'String'
+    AllowedPattern: "^o-[a-z0-9]{10,32}"
+    Description: AWS Organization ID
+  SSEAlgorithm:
+    Type: 'String'
+    Default: 'AES256'
+    Description: S3 bucket SSE Algorithm.
+    AllowedValues:
+    - 'AES256'
+    - 'aws:kms'
+  KMSMasterKeyID:
+    Type: 'String'
+    Description: 'KMS key ID required if SSE algorithm is aws:kms.'
+    Default: ''
+
+Conditions:
+  UseKMS: !Equals
+    - !Ref SSEAlgorithm
+    - 'aws:kms'
+
+Resources:
+  # Create S3 bucket
+  S3ConformsBucket:
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ["-", [ "awsconfigconforms", !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref "AWS::StackId"]]]]]]
+      # VersioningConfiguration:
+      #   Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - !If
+          - UseKMS
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: !Ref SSEAlgorithm
+              KMSMasterKeyID: !Ref KMSMasterKeyID
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: !Ref SSEAlgorithm
+
+  # Bucket Policy
+  S3ConformsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3ConformsBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowGetObject
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${S3ConformsBucket}/*"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrgId
+          - Sid: AllowGetBucketAcl
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetBucketAcl
+            Resource: !Sub "arn:aws:s3:::${S3ConformsBucket}"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrgId
+
+Outputs:
+  BucketName:
+    Description: Config Conformance Packs Bucket name
+    Value: !Ref S3ConformsBucket

@@ -1,0 +1,310 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Provision StackSets to configure AWS Config in additional regions 
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "AWS Config Parameters"
+        Parameters:
+          - DeployTo
+          - RegionsToDeploy
+          - NewStackSetName
+      -
+        Label:
+          default: "Conformance Pack Parameters"
+        Parameters:
+          - SetupConformancePackEnv
+          - SSEAlgorithm
+          - KMSMasterKeyID      
+          - LogArchiveAccountId
+
+Parameters:
+  DeployTo:
+    Type: String
+    AllowedValues: ["Existing Only", "Future Only", "Both"]
+    Default: "Both"
+    Description: To which accounts AWS Config be deployed
+  RegionsToDeploy:
+    Type: String
+    Default: "us-west-1,ap-northeast-1"
+    Description: List of regions to enable AWS Config on (ap-south-1,eu-west-3,eu-west-2,ap-northeast-2,ap-northeast-1,sa-east-1,ca-central-1,ap-southeast-1,eu-central-1,us-west-1,eu-north-1)
+  NewStackSetName:
+    Type: String
+    Default: "CUSTOM-CONFIG-STACKSET"
+    Description: Stackset name to use
+  SSEAlgorithm:
+    Type: 'String'
+    Default: 'AES256'
+    Description: S3 bucket SSE Algorithm.
+    AllowedValues:
+    - 'AES256'
+    - 'aws:kms'
+  KMSMasterKeyID:
+    Type: 'String'
+    Description: 'KMS key ID required if SSE algorithm is aws:kms.'
+    Default: ''
+  SetupConformancePackEnv:
+    Type: 'String'
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+    Description: 'Setup Centralized S3 Bucket for Conformance Pack'
+  LogArchiveAccountId:
+    Type: 'String'
+    AllowedPattern: "^[0-9]{12}"
+    Description: 'You Log Archive Account Id'
+
+Resources:
+  RegionsToDeployParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: List of regions to deploy stacks in
+      Type: String
+      Value: !Ref RegionsToDeploy
+
+  launchERLambdaRoleExe:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition: {}
+      Path: /
+      Policies:
+        - PolicyName: CloudFormation_ops
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: VisualEditor2
+              Effect: Allow
+              Action:
+                - cloudformation:CreateStackSet
+                - cloudformation:CreateStackInstances
+                - cloudformation:DescribeStackSet
+                - cloudformation:ListStackInstances
+                - cloudformation:ListStackSets
+                - cloudformation:DeleteStackInstances
+                - cloudformation:DescribeStackSetOperation
+                - cloudformation:DeleteStackSet
+              Resource: !Join [':', ['arn:aws:cloudformation', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'stackset/*']]
+        - PolicyName: Pass_Role
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: VisualEditor3
+              Effect: Allow
+              Action:
+                - iam:PassRole
+              Resource: !Join [':', ['arn:aws:iam:', !Ref "AWS::AccountId", 'role/service-role/AWSControlTowerStackSetRole']]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSOrganizationsReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  permissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt "LambdaToLaunchERStackSet.Arn"
+      Principal: cloudformation.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+
+  LambdaToLaunchERStackSet:
+    Type: 'AWS::Lambda::Function'
+    DeletionPolicy: Delete
+    Properties:
+      Code:
+        S3Bucket: !Join ['-', ['marketplace-sa-resources-ct', !Ref "AWS::Region"]]
+        S3Key: extended_regions_lambda.zip
+      Description: Lambda to launch the StackSet that extends region support 
+      Handler: extended_regions_lambda.lambda_handler
+      Runtime: python3.8
+      MemorySize: 128
+      Role: !GetAtt launchERLambdaRoleExe.Arn
+      Timeout: 900
+      Environment:
+        Variables:
+          DeployTo: !Ref DeployTo
+          RegionsToDeploy: !Ref RegionsToDeploy
+          NewStackSetName: !Ref NewStackSetName
+          SSEAlgorithm: !Ref SSEAlgorithm
+          KMSMasterKeyID: !Ref KMSMasterKeyID
+          SetupConformancePackEnv: !Ref SetupConformancePackEnv
+          LogArchiveAccountId: !Ref LogArchiveAccountId
+
+  TriggerLambda:
+    Type: 'Custom::TriggerLambda'
+    DependsOn:
+      - launchERLambdaRoleExe
+      - permissionForEventsToInvokeLambda
+    Properties:
+      ServiceToken: !GetAtt LambdaToLaunchERStackSet.Arn
+
+  CaptureControlTowerCMLifeCycleEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Capture Control Tower LifeCycle Events and Trigger an Action
+      EventPattern:
+        detail:
+          eventName:
+          - CreateManagedAccount
+          eventSource:
+          - controltower.amazonaws.com
+        detail-type:
+        - AWS Service Event via CloudTrail
+        source:
+        - aws.controltower
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ExtendedRegionLEFIFOQueue.Arn
+          Id: "ExtendedRegion_Lifecycle_Event_FIFO_Queue"
+          SqsParameters: 
+            MessageGroupId: ExtendedRegion_Lifecycle_Event
+
+  # FIFO SQS Dead Letter Queue for storing Lifecycle Events (LE) that can't be processed (consumed) successfully
+  ExtendedRegionLEFIFODLQueue:
+    Type: "AWS::SQS::Queue"
+    DependsOn: LambdaToLaunchERStackSet
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "The queue name is defined in order not to exceed the limit on the length of SQS queue name."
+    Properties:
+      # QueueName: ExtendedRegionLEFIFODLQueue.fifo
+      ContentBasedDeduplication: True
+      FifoQueue: True
+      MessageRetentionPeriod: 1209600 #1209600 seconds (14 days)
+      ReceiveMessageWaitTimeSeconds: 10
+
+  # FIFO SQS Queue for storing Lifecycle Events (LE)
+  ExtendedRegionLEFIFOQueue:
+    Type: "AWS::SQS::Queue"
+    DependsOn: LambdaToLaunchERStackSet
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "The queue name is defined in order not to exceed the limit on the length of SQS queue name."
+    Properties:
+      # QueueName: ExtendedRegionLEFIFOQueue.fifo
+      ContentBasedDeduplication: True
+      FifoQueue: True
+      MessageRetentionPeriod: 345600  #345600 seconds (4 days)
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 900  
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ExtendedRegionLEFIFODLQueue.Arn
+        maxReceiveCount: 5
+
+  # Create event source mapping between the lifecycle event FIFO queue and lambda function to make the queue as the lambda trigger
+  ExtendedRegionLEQueueLambdaEventMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties: 
+      BatchSize: 10
+      Enabled: true
+      EventSourceArn: !GetAtt ExtendedRegionLEFIFOQueue.Arn
+      FunctionName: !Ref ExtendedRegionLELambda
+
+  # Lifecycle event SQS Policy
+  ExtendedRegionLEQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: 
+        - !Ref ExtendedRegionLEFIFOQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ExtendedRegionLEFIFOQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt CaptureControlTowerCMLifeCycleEvents.Arn
+
+  # Lambda function to process messages (lifecycle events) from SQS
+  ExtendedRegionLELambda:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Delete
+    Properties:
+      Code:
+        S3Bucket: !Join ['-', ['marketplace-sa-resources-ct', !Ref "AWS::Region"]]
+        S3Key: extended_regions_lambda.zip
+      Description: Lambda to handle AWS Control Tower lifecycle events 
+      Handler: extended_regions_lce_lambda.lambda_handler
+      MemorySize: 512
+      Role: !GetAtt 'ExtendedRegionLELambdaRole.Arn'
+      Runtime: python3.8
+      Timeout: 900
+      Environment:
+        Variables:
+          NewStackSetName: !Ref NewStackSetName
+          RegionsToDeploy: !Ref RegionsToDeployParam
+
+  ExtendedRegionLELambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Path: /
+        Policies:
+          - PolicyName: ExtendedRegionLELambdaPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - cloudformation:CreateStackSet
+                    - cloudformation:CreateStackInstances
+                    - cloudformation:DescribeStackSet
+                    - cloudformation:ListStackInstances
+                    - cloudformation:ListStackSets
+                    - cloudformation:DeleteStackInstances
+                    - cloudformation:DescribeStackSetOperation
+                    - cloudformation:DeleteStackSet
+                  Resource: 
+                    - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/*
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource:
+                    - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource:
+                    - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${RegionsToDeployParam}
+                - Effect: Allow
+                  Action:
+                    - ssm:DescribeParameters
+                  Resource:
+                    - '*'
+                - Effect: Allow
+                  Action:
+                    - sqs:ReceiveMessage
+                    - sqs:DeleteMessage
+                    - sqs:ListQueues
+                    - sqs:GetQueueAttributes
+                  Resource: !GetAtt ExtendedRegionLEFIFOQueue.Arn 
+                - Effect: Allow
+                  Action:
+                    - 'cloudformation:CreateStackInstances'
+                  Resource: !Join [':',['arn:aws:cloudformation', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'stackset/*:*']]
+               
+Outputs:
+    RegionsToDeployParamName:
+        Value: !Join ['/', ['https://console.aws.amazon.com/systems-manager/parameters', !Ref RegionsToDeployParam]]
