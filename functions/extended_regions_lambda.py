@@ -435,6 +435,7 @@ def lambda_handler(event, context):
 
     cnfpack_stack = 'CNFPACK-LOGARCHIVE-' + custom_stack
     config_result = False
+    cnfpack_result = False
     response_data = {}
     status = False
 
