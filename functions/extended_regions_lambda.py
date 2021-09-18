@@ -449,7 +449,8 @@ def lambda_handler(event, context):
                                                      kms_key,
                                                      log_account_id)
         else:
-            LOGGER.error('SKIPING CnfPack: %s, %s', config_result, set_cnfpack)
+            LOGGER.info('SKIPPING CnfPack: %s, %s', config_result, set_cnfpack)
+            cnfpack_result = True
 
         if config_result and cnfpack_result:
             status = True
