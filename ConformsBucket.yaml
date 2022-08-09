@@ -26,11 +26,12 @@ Resources:
   # Create S3 bucket
   S3ConformsBucket:
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Join ["-", [ "awsconfigconforms", !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref "AWS::StackId"]]]]]]
-      # VersioningConfiguration:
-      #   Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
       BucketEncryption:
         ServerSideEncryptionConfiguration:
         - !If
