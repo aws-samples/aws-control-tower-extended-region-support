@@ -181,6 +181,7 @@ Resources:
       FifoQueue: True
       MessageRetentionPeriod: 1209600 #1209600 seconds (14 days)
       ReceiveMessageWaitTimeSeconds: 10
+      SqsManagedSseEnabled: True
 
   # FIFO SQS Queue for storing Lifecycle Events (LE)
   ExtendedRegionLEFIFOQueue:
@@ -198,6 +199,7 @@ Resources:
       MessageRetentionPeriod: 345600  #345600 seconds (4 days)
       ReceiveMessageWaitTimeSeconds: 20
       VisibilityTimeout: 900  
+      SqsManagedSseEnabled: True
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt ExtendedRegionLEFIFODLQueue.Arn
         maxReceiveCount: 5
